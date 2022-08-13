@@ -3,21 +3,18 @@ use anyhow::{anyhow, Context, Result};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{GetLastError, HANDLE, HINSTANCE, HWND, WAIT_FAILED, WAIT_TIMEOUT},
+        Foundation::{GetLastError, HANDLE, WAIT_FAILED, WAIT_TIMEOUT},
         Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
         System::{
             Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE},
-            Registry::HKEY,
             Threading::{
                 GetCurrentProcess, OpenProcessToken, WaitForSingleObject, WAIT_ABANDONED,
                 WAIT_OBJECT_0,
             },
         },
         UI::{
-            Shell::{
-                ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHELLEXECUTEINFOW_0,
-            },
-            WindowsAndMessaging::{MessageBoxW, IDCANCEL, IDOK, MB_OKCANCEL, SW_NORMAL},
+            Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW},
+            WindowsAndMessaging::{MessageBoxW, IDCANCEL, IDNO, IDYES, MB_YESNO, SW_NORMAL},
         },
     },
 };
@@ -110,7 +107,7 @@ pub fn install_webview2(as_admin: bool) -> Result<()> {
         } else {
             dbg!(get_webview2_version());
             Err(anyhow!(
-                "error run process\nprocess exited with code: {}\nstdout: {}\nstderr: {}",
+                "error run process\r\nprocess exited with code: {}\r\nstdout: {}\r\nstderr: {}",
                 output.status.code().unwrap_or(1),
                 std::str::from_utf8(&output.stdout).unwrap_or_default(),
                 std::str::from_utf8(&output.stderr).unwrap_or_default()
@@ -126,22 +123,17 @@ pub fn install_webview2(as_admin: bool) -> Result<()> {
         }
         const WAIT_TIMEOUT_VALUE: u32 = WAIT_TIMEOUT.0;
         const WAIT_FAILED_VALUE: u32 = WAIT_FAILED.0;
+        let verb = WString::new("runas");
+        let file = WString::from_opt_str(target.to_str());
+        let para = WString::new("/install");
         let mut info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
             fMask: SEE_MASK_NOCLOSEPROCESS,
-            hwnd: HWND::default(),
-            lpVerb: WString::new("runas").as_pcwstr(),
-            lpFile: WString::from_opt_str(target.to_str()).as_pcwstr(),
-            lpParameters: WString::new("/install").as_pcwstr(),
-            lpDirectory: PCWSTR(std::ptr::null()),
+            lpVerb: verb.as_pcwstr(),
+            lpFile: file.as_pcwstr(),
+            lpParameters: para.as_pcwstr(),
             nShow: SW_NORMAL.0 as i32,
-            hInstApp: HINSTANCE::default(),
-            lpIDList: std::ptr::null_mut::<std::ffi::c_void>(),
-            lpClass: PCWSTR(std::ptr::null()),
-            hkeyClass: HKEY::default(),
-            dwHotKey: 0,
-            Anonymous: SHELLEXECUTEINFOW_0::default(),
-            hProcess: HANDLE::default(),
+            ..Default::default()
         };
         match unsafe {
             ShellExecuteExW(&mut info);
@@ -168,17 +160,38 @@ pub fn check_and_install_webview2(try_as_admin: bool) -> Result<()> {
         return Ok(());
     }
 
+    let install_request =
+        WString::new("WebView2 Runtime is not installed. Install now?\r\n(Click Cancel to exit)");
+    let install_request_without_admin = WString::new(
+        "Do you want to install the WebView2 Runtime without administrator permission?\r\n(Click Cancel to exit)",
+    );
+    let install_request_title = WString::new("Require WebView2 Runtime");
     match unsafe {
         MessageBoxW(
             None,
-            WString::new("WebView2 Runtime is not installed. Install now?\n(Click Cancel to exit)")
-                .as_pcwstr(),
-            PCWSTR(WString::new("Require WebView2 Runtime").as_ptr()),
-            MB_OKCANCEL,
+            install_request.as_pcwstr(),
+            install_request_title.as_pcwstr(),
+            MB_YESNO,
         )
     } {
-        IDOK => install_webview2(try_as_admin),
-        IDCANCEL => Err(anyhow!("user canceled webview2 installation")),
-        _ => Err(anyhow!("unknown operation in MessageBoxW")),
+        IDYES => match install_webview2(try_as_admin) {
+            Ok(ret) => Ok(ret),
+            Err(err) => {
+                match unsafe {
+                    MessageBoxW(
+                        None,
+                        install_request_without_admin.as_pcwstr(),
+                        install_request_title.as_pcwstr(),
+                        MB_YESNO,
+                    )
+                } {
+                    IDYES => install_webview2(false),
+                    IDNO | IDCANCEL => Err(err),
+                    id => Err(anyhow!("unknown operation in MessageBoxW: {:?}", id)),
+                }
+            }
+        },
+        IDNO | IDCANCEL => Err(anyhow!("user canceled webview2 installation")),
+        id => Err(anyhow!("unknown operation in MessageBoxW: {:?}", id)),
     }
 }
